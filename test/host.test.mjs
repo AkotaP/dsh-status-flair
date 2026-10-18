@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import z from '@deepseek-ai/schemastery'
 import { isVolatile } from '@deepseek-ai/cosmokit'
-import { Config, DEFAULT_FLAIR, DEFAULT_ID, ENTRY_ID, FLAIR_KEY, apply, inject } from '../lib/index.js'
+import { Config, DEFAULT_FLAIR, DEFAULT_SELECTION, DEFAULT_ID, ENTRY_ID, FLAIR_KEY, createStarterRules, apply, inject } from '../lib/index.js'
 import { loadClient } from './support/harness.mjs'
 
 // ---- dsh-settings/lib/index.js 的三个纯函数的等价实现 ----
@@ -94,7 +94,9 @@ test('宿主半只依赖 webServer，并注册一条只读健康路由', () => {
       }
     },
   }
-  apply(ctx, { flair: { get: () => DEFAULT_FLAIR } })
+  let currentFlair = DEFAULT_FLAIR
+  apply(ctx, { flair: { get: () => currentFlair } })
+  assert.equal(effects.length, 1, '只注册健康路由，不增加会话监听')
   assert.equal(registrations.length, 1)
   assert.equal(registrations[0].kind, 'prefix')
   assert.equal(registrations[0].path, '/status-flair')
@@ -117,6 +119,8 @@ test('宿主半只依赖 webServer，并注册一条只读健康路由', () => {
   assert.equal(body.loaded, true)
   assert.equal(body.volatile, true)
   assert.equal(body.enabled, true)
+  assert.equal(body.eventGroups, 0)
+  assert.deepEqual(body.eventRules, { enabled: false, count: 4, enabledCount: 4 })
   assert.deepEqual(body.presets, ['golden', 'violet', 'terminal'])
   assert.deepEqual(body.textPresets, [], '默认不带文案组')
   assert.equal(body.client, null, '没收到浏览器心跳前是 null')
@@ -130,6 +134,18 @@ test('宿主半只依赖 webServer，并注册一条只读健康路由', () => {
   }
   registrations[0].handler({ url: '/status-flair/client?id=dsh-status-flair&key=dsh-status-flair' }, beacon)
   assert.equal(beacon.status, 204)
+  currentFlair = {
+    ...DEFAULT_FLAIR,
+    eventGroups: [{ id: 'private-group', name: 'private-group-name', events: ['private-event'] }],
+    eventRules: {
+      enabled: true,
+      minRefreshMs: 750,
+      rules: [
+        { id: 'private-rule', name: 'private-rule-name', enabled: true, selection: { fixedPresetId: 'private-look' } },
+        { id: 'disabled-rule', enabled: false },
+      ],
+    },
+  }
   const chunksAfter = []
   const resAfter = {
     writeHead(status, headers) {
@@ -144,6 +160,9 @@ test('宿主半只依赖 webServer，并注册一条只读健康路由', () => {
   const bodyAfter = JSON.parse(chunksAfter[0])
   assert.equal(bodyAfter.client.moduleId, 'dsh-status-flair')
   assert.equal(typeof bodyAfter.client.at, 'number')
+  assert.equal(bodyAfter.eventGroups, 1)
+  assert.deepEqual(bodyAfter.eventRules, { enabled: true, count: 2, enabledCount: 1 })
+  assert.equal(chunksAfter[0].includes('private-'), false, '健康摘要不得泄露分组或规则内容')
 
   // 没有 webServer 的部署也不能崩
   assert.doesNotThrow(() => apply({ effect: (fn) => fn(), get: () => undefined }, undefined))
@@ -164,6 +183,8 @@ test('flair 之下的路径全部可写，其它字段不行', () => {
   assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'selection', 'textPresetMode']), true)
   assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'triggers', 'text', 'time', 'fixedMs']), true)
   assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'triggers', 'look', 'step', 'every']), true)
+  assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'eventGroups', '0', 'events']), true)
+  assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'eventRules', 'rules', '0', 'selection']), true)
   assert.equal(isVolatilePath(Config, ['other']), false)
   assert.equal(isVolatilePath(Config, []), false)
 })
@@ -171,7 +192,15 @@ test('flair 之下的路径全部可写，其它字段不行', () => {
 test('这份配置里外观、文案与选择字段都在表单里', () => {
   const form = volatileForm(Config)
   const flairForm = form.dict[FLAIR_KEY]
-  assert.deepEqual(Object.keys(flairForm.dict).sort(), ['enabled', 'presets', 'selection', 'textPresets', 'triggers'])
+  assert.deepEqual(Object.keys(flairForm.dict).sort(), ['enabled', 'eventGroups', 'eventRules', 'presets', 'selection', 'textPresets', 'triggers'])
+  assert.deepEqual(Object.keys(flairForm.dict.eventGroups.inner.dict).sort(), ['activityKinds', 'events', 'id', 'kind', 'name', 'toolNames'])
+  assert.deepEqual(Object.keys(flairForm.dict.eventRules.dict).sort(), ['enabled', 'minRefreshMs', 'rules'])
+  const ruleForm = flairForm.dict.eventRules.dict.rules.inner
+  assert.deepEqual(Object.keys(ruleForm.dict).sort(), ['enabled', 'groupIds', 'holdMs', 'id', 'kind', 'name', 'nameKey', 'selection'])
+  assert.deepEqual(Object.keys(ruleForm.dict.selection.dict).sort(), Object.keys(flairForm.dict.selection.dict).sort())
+  for (const [key, schema] of Object.entries(flairForm.dict.selection.dict)) {
+    assert.deepEqual(ruleForm.dict.selection.dict[key].toJSON(), schema.toJSON(), '规则复用 SelectionSchema 字段：' + key)
+  }
   // 外观与文案各自独立的触发配置：每轮 + 时间（固定/随机）+ 步骤
   assert.deepEqual(Object.keys(flairForm.dict.triggers.dict).sort(), ['look', 'text'])
   const layerForm = flairForm.dict.triggers.dict.look
@@ -241,6 +270,8 @@ test('空配置也会拿到默认外观与默认文案（首装即用）', () =>
   assert.equal(resolved[FLAIR_KEY].textPresets.length, DEFAULT_FLAIR.textPresets.length)
   assert.equal(resolved[FLAIR_KEY].selection.fixedPresetId, 'golden')
   assert.equal(resolved[FLAIR_KEY].selection.fixedTextPresetId, 'default')
+  assert.deepEqual(resolved[FLAIR_KEY].eventGroups, [])
+  assert.deepEqual(resolved[FLAIR_KEY].eventRules, DEFAULT_FLAIR.eventRules)
 })
 
 test('旧配置（文案还挂在预设里）不会被 schema 丢掉 texts', () => {
@@ -259,6 +290,159 @@ test('旧配置（文案还挂在预设里）不会被 schema 丢掉 texts', () 
   assert.deepEqual(resolved[FLAIR_KEY].presets[0].texts, ['正在认真思考中…'], '迁移要靠这份旧字段，不能被 strip')
   // textPresets 默认空数组：客户端据此判断需要迁移
   assert.deepEqual(resolved[FLAIR_KEY].textPresets, [])
+  assert.deepEqual(resolved[FLAIR_KEY].eventGroups, [], '旧配置不写入内置事件组')
+  assert.deepEqual(resolved[FLAIR_KEY].eventRules, DEFAULT_FLAIR.eventRules, '旧配置补入门规则，但不隐式启用事件规则')
+})
+
+test('事件分组与规则经过 volatile 表单和 JSON 持久化后保真，删除项不残留', () => {
+  const eventGroups = [
+    { id: 'tools', name: '工具活动', kind: 'activity', activityKinds: ['tool'], toolNames: ['read', 'ops_bash'], events: [] },
+    { id: 'errors', name: '失败脉冲', kind: 'pulse', activityKinds: [], toolNames: ['ops_bash'], events: ['tool-error'] },
+  ]
+  const eventRules = {
+    enabled: true,
+    minRefreshMs: 800,
+    rules: [
+      {
+        id: 'activity-rule', name: '工具规则', nameKey: 'customRuleName', enabled: true, kind: 'activity',
+        groupIds: ['tools', 'builtin:thinking'], holdMs: 2000,
+        selection: {
+          presetMode: 'random', fixedPresetId: 'terminal', presetIds: ['terminal', 'default'],
+          textPresetMode: 'random', fixedTextPresetId: 'my-text', textPresetIds: ['my-text', 'default'], textMode: 'sequential',
+        },
+      },
+      {
+        id: 'pulse-rule', name: '失败规则', nameKey: '', enabled: false, kind: 'pulse',
+        groupIds: ['errors', 'builtin:tool-error', 'builtin:tool-success'], holdMs: 4500,
+        selection: { ...DEFAULT_FLAIR.selection, fixedPresetId: 'violet', textMode: 'first' },
+      },
+    ],
+  }
+  const input = { [FLAIR_KEY]: { ...DEFAULT_FLAIR, eventGroups, eventRules } }
+  const form = volatileForm(Config)
+  const projected = projectForm(form, plainConfig(Config(input)))
+  assert.deepEqual(projected[FLAIR_KEY].eventGroups, eventGroups)
+  assert.deepEqual(projected[FLAIR_KEY].eventRules, eventRules)
+  const saved = JSON.parse(JSON.stringify(projected))
+  const again = projectForm(form, plainConfig(Config(saved)))
+  assert.deepEqual(again, projected)
+
+  saved[FLAIR_KEY].eventGroups = saved[FLAIR_KEY].eventGroups.slice(1)
+  saved[FLAIR_KEY].eventRules.rules = saved[FLAIR_KEY].eventRules.rules.slice(1)
+  const trimmed = projectForm(form, plainConfig(Config(saved)))
+  assert.deepEqual(trimmed[FLAIR_KEY].eventGroups, eventGroups.slice(1))
+  assert.deepEqual(trimmed[FLAIR_KEY].eventRules.rules, eventRules.rules.slice(1))
+})
+
+test('事件配置补全安全默认值，规则保留完整选择字段', () => {
+  const resolved = plainConfig(Config({
+    [FLAIR_KEY]: {
+      eventGroups: [{ id: 'custom' }],
+      eventRules: { rules: [{ id: 'custom-rule' }] },
+    },
+  }))[FLAIR_KEY]
+  assert.deepEqual(resolved.eventGroups, [{ id: 'custom', name: '', kind: 'activity', activityKinds: [], toolNames: [], events: [] }])
+  assert.equal(resolved.eventRules.enabled, false)
+  assert.equal(resolved.eventRules.minRefreshMs, 3000)
+  assert.deepEqual(resolved.eventRules.rules, [{
+    id: 'custom-rule', name: '', nameKey: '', enabled: true, kind: 'activity', groupIds: [], holdMs: 2000,
+    selection: DEFAULT_FLAIR.selection,
+  }])
+})
+
+test('事件类型仅接受 activity 或 pulse', () => {
+  assert.throws(() => Config({ [FLAIR_KEY]: { eventGroups: [{ id: 'invalid', kind: 'other' }] } }))
+  assert.throws(() => Config({ [FLAIR_KEY]: { eventRules: { rules: [{ id: 'invalid', kind: 'other' }] } } }))
+})
+
+test('规则刷新默认三秒，显式保存的间隔保持不变', () => {
+  const missing = plainConfig(Config({ flair: { eventRules: { rules: [] } } })).flair
+  assert.equal(missing.eventRules.minRefreshMs, 3000)
+  for (const interval of [0, 500, 1200, 2000, 3000, 5000]) {
+    const resolved = plainConfig(Config({ flair: { eventRules: { minRefreshMs: interval, rules: [] } } })).flair
+    assert.equal(resolved.eventRules.minRefreshMs, interval)
+    assert.deepEqual(resolved.eventRules.rules, [])
+  }
+})
+
+test('入门规则固定分为思考交互、信息获取、执行操作和回复，默认选择不变', () => {
+  assert.deepEqual(DEFAULT_SELECTION, {
+    presetMode: 'fixed', fixedPresetId: 'golden', presetIds: ['golden', 'violet', 'terminal'],
+    textPresetMode: 'fixed', fixedTextPresetId: 'default', textPresetIds: ['default'], textMode: 'random',
+  })
+  assert.deepEqual(DEFAULT_FLAIR.selection, DEFAULT_SELECTION)
+  const metadata = createStarterRules().map(({ selection, ...rest }) => rest)
+  assert.deepEqual(metadata, [
+    { id: 'starter-thinking', name: '思考与交互', nameKey: 'starterThinking', enabled: true, kind: 'activity', holdMs: 2000,
+      groupIds: ['builtin:waiting', 'builtin:thinking', 'builtin:questions', 'builtin:plan'] },
+    { id: 'starter-information', name: '信息获取', nameKey: 'starterInformation', enabled: true, kind: 'activity', holdMs: 2000,
+      groupIds: ['builtin:read', 'builtin:readImage', 'builtin:search', 'builtin:webSearch', 'builtin:webFetch'] },
+    { id: 'starter-execution', name: '执行与操作', nameKey: 'starterExecution', enabled: true, kind: 'activity', holdMs: 2000,
+      groupIds: ['builtin:write', 'builtin:edit', 'builtin:commands', 'builtin:code', 'builtin:subagents', 'builtin:tools'] },
+    { id: 'starter-response', name: '回复', nameKey: 'starterResponse', enabled: true, kind: 'activity', holdMs: 2000,
+      groupIds: ['builtin:responding'] },
+  ])
+  assert.equal(DEFAULT_FLAIR.eventRules.enabled, false)
+  assert.equal(DEFAULT_FLAIR.eventRules.minRefreshMs, 3000)
+  assert.deepEqual(DEFAULT_FLAIR.eventRules.rules, createStarterRules())
+})
+
+test('入门规则使用DSH自带外观与文案，每条选择字段和候选数组独立', () => {
+  const baseline = structuredClone(DEFAULT_SELECTION)
+  const official = { presetMode: 'fixed', fixedPresetId: DEFAULT_ID, presetIds: [DEFAULT_ID],
+    textPresetMode: 'fixed', fixedTextPresetId: DEFAULT_ID, textPresetIds: [DEFAULT_ID], textMode: 'random' }
+  const rules = createStarterRules(), second = createStarterRules()
+  for (const [index, rule] of rules.entries()) {
+    assert.deepEqual(rule.selection, official)
+    assert.notEqual(rule.selection, DEFAULT_SELECTION)
+    assert.notEqual(rule.selection.presetIds, DEFAULT_SELECTION.presetIds)
+    assert.notEqual(rule.selection.textPresetIds, DEFAULT_SELECTION.textPresetIds)
+    assert.notEqual(rule.selection, second[index].selection)
+    assert.notEqual(rule.groupIds, second[index].groupIds)
+    for (const other of rules.slice(index + 1)) {
+      assert.notEqual(rule.selection, other.selection)
+      assert.notEqual(rule.selection.presetIds, other.selection.presetIds)
+      assert.notEqual(rule.selection.textPresetIds, other.selection.textPresetIds)
+    }
+  }
+  rules[0].selection.fixedPresetId = 'changed'
+  rules[0].selection.presetIds.push('changed')
+  rules[0].selection.textPresetIds.push('changed')
+  rules[0].groupIds.push('builtin:changed')
+  assert.deepEqual(DEFAULT_SELECTION, baseline)
+  assert.deepEqual(rules[1].selection, official)
+})
+
+
+test('缺省事件规则补四条且保持关闭，显式空数组和已有规则不会被补齐或覆盖', () => {
+  const form = volatileForm(Config)
+  for (const input of [{}, { flair: {} }, { flair: { eventRules: {} } }]) {
+    const projected = projectForm(form, plainConfig(Config(input)))
+    assert.deepEqual(projected.flair.eventRules, DEFAULT_FLAIR.eventRules)
+    const again = projectForm(form, plainConfig(Config(JSON.parse(JSON.stringify(projected)))))
+    assert.deepEqual(again.flair.eventRules, projected.flair.eventRules, '入门规则名称标记与完整选择来回保真')
+  }
+  for (const enabled of [false, true]) {
+    const resolved = plainConfig(Config({ flair: { eventRules: { enabled, rules: [] } } }))
+    assert.deepEqual(resolved.flair.eventRules, { enabled, minRefreshMs: 3000, rules: [] })
+    const again = projectForm(form, plainConfig(Config(JSON.parse(JSON.stringify(resolved)))))
+    assert.deepEqual(again.flair.eventRules.rules, [], '显式删除全部规则后不恢复入门规则')
+  }
+  const existing = { ...createStarterRules()[0], id: 'custom', name: 'Custom name', nameKey: '', groupIds: ['builtin:read'] }
+  const resolved = plainConfig(Config({ flair: { eventRules: { enabled: true, minRefreshMs: 900, rules: [existing] } } }))
+  assert.deepEqual(resolved.flair.eventRules, { enabled: true, minRefreshMs: 900, rules: [existing] })
+})
+
+test('独立解析配置不会共享入门规则及其候选数组', () => {
+  const first = plainConfig(Config({})).flair.eventRules.rules
+  const second = plainConfig(Config({})).flair.eventRules.rules
+  const expected = createStarterRules()
+  first[0].selection.presetIds.push('private-look')
+  first[0].selection.textPresetIds.push('private-text')
+  first[0].name = 'Private name'
+  assert.deepEqual(second, expected)
+  assert.deepEqual(first[1].selection, expected[1].selection)
+  assert.deepEqual(DEFAULT_FLAIR.eventRules.rules, expected)
 })
 
 test('客户端半的默认值与宿主半一致', async () => {

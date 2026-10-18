@@ -1032,50 +1032,42 @@ test('扫光色归一化：只接受合法 CSS 颜色，非法值退回自动', 
   assert.equal(rejected.shimmerLight, '', '非法颜色退回空串（自动）')
 })
 
-test('步骤触发的事件源：注册观察 Definition，收到 step/start 才计数', async () => {
+test('步骤触发借用主会话来源，不在 replayable Definition 中产生副作用', async () => {
   const { dom } = await loadClient()
   reset(dom)
-  const base = plain(withTextPresets())
-  const config = {
-    ...base,
-    triggers: {
-      look: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: false, every: 2 } },
-      text: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: true, every: 2 } },
-    },
+  const config = { ...plain(withTextPresets()), triggers: {
+    look: { step: { enabled: false, every: 2 } }, text: { step: { enabled: true, every: 2 } },
+  } }
+  function source(initial) {
+    let snapshot = initial
+    const listeners = new Set()
+    return { getSnapshot: () => snapshot, subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn) },
+      push(next) { snapshot = next; for (const fn of listeners) fn() } }
   }
-  let definition = null
-  const uiConversation = {
-    events: {
-      register(value) {
-        definition = value
-        return () => {
-          definition = null
-        }
-      },
-    },
-  }
-  const host = createCtx({ forms: { get: () => createForm({ flair: plain(config) }) }, uiConversation })
+  const events = source({ revision: 0, change: { kind: 'replace', entries: [] } })
+  const target = source({ legacy: { runningCalls: [] } }), openTurn = source(1)
+  const binding = { sessionId: 'main', eventSource: events }
+  const sessions = { list: source({ byId: { main: { id: 'main', retainedBy: { mainView: 1 } } } }), binding: () => binding }
+  const uiConversation = { binding: () => ({ target: () => target, openTurn }), events: { register() { throw new Error('must not register a side-effect matcher') } } }
+  const host = createCtx({ forms: { get: () => createForm({ flair: config }) }, sessions, uiConversation })
   module.apply(host.ctx)
   try {
-    assert.notEqual(definition, null, '应注册一个 step 观察 Definition')
-    assert.equal(typeof definition.match, 'function')
-
     T.setRandom(() => 0)
-    T.resetRun()
-    dom.setRunning(true)
     T.rollRun()
-    const firstText = T.run.text
-
-    assert.equal(definition.match({ type: 'step/start', data: {} }), null, '只旁听，不认领事件')
+    const first = T.run.text
+    const append = (revision, type, data = { turn: 1 }) => events.push({ revision, change: { kind: 'append', entries: [{ type: 'event', event: { type, data } }] } })
+    append(1, 'step/start')
+    assert.equal(T.run.stepCount, 1)
+    append(1, 'step/start')
+    assert.equal(T.run.stepCount, 1, '重复 revision 不计步')
     T.setRandom(() => 0.9)
-    definition.match({ type: 'step/start', data: {} })
-    assert.notEqual(T.run.text, firstText, '第 2 个 step/start 触发文案重抽')
-
-    definition.match({ type: 'turn/start', data: {} })
-    assert.equal(T.run.stepCount, 0, '新 turn 重置步数')
-  } finally {
-    host.dispose()
-  }
+    append(2, 'step/start')
+    assert.notEqual(T.run.text, first)
+    events.push({ revision: 3, change: { kind: 'prepend', entries: [{ type: 'event', event: { type: 'step/start', data: { turn: 1 } } }] } })
+    assert.equal(T.run.stepCount, 2, '历史 prepend 不计步')
+    append(4, 'turn/start', { turn: 2 })
+    assert.equal(T.run.stepCount, 0)
+  } finally { host.dispose() }
 })
 
 test('设置页渲染切换时机：外观与文案两层各含每轮、时间、步骤触发', async () => {
@@ -1243,6 +1235,325 @@ test('图标可选「不显示」：归一化接受 none，绘制时隐藏图标
   } finally {
     host.dispose()
   }
+})
+
+test('事件配置界面：添加/排序/预览不修改默认选择或运行游标', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  let value = T.normalizeFlair({ ...withTextPresets(), eventRules: { enabled: false, rules: [] } }), changed
+  const nodes = (tree, out = []) => { if (Array.isArray(tree)) tree.forEach((v) => nodes(v, out)); else if (tree && typeof tree === 'object') { out.push(tree); nodes(tree.props?.children, out) } return out }
+  const render = () => nodes(T.EventRulesEditor({ value, t: (key) => key, writable: true, onChange: (next) => { changed = next } }))
+  const button = (tree, text, n = 0) => tree.filter((x) => x.type === 'button' && x.props.children.includes(text))[n]
+  button(render(), 'eventAddRule').props.onClick()
+  assert.equal(changed.eventRules.rules.length, 1)
+  assert.deepEqual(changed.eventRules.rules[0].selection, value.selection)
+  assert.deepEqual(changed.selection, value.selection)
+  value = T.normalizeFlair(changed)
+  button(render(), 'eventAddRule').props.onClick()
+  // makeId must produce distinct ids even when the random source is deterministic.
+  assert.notEqual(changed.eventRules.rules[0].id, changed.eventRules.rules[1].id)
+  value = T.normalizeFlair(changed)
+  const second = value.eventRules.rules[1].id
+  button(render(), 'eventMoveUp', 1).props.onClick()
+  assert.equal(changed.eventRules.rules[0].id, second)
+  const before = plain(T.run)
+  button(render(), 'eventPreview').props.onClick()
+  assert.deepEqual(plain(T.run), before)
+  assert.ok(render().some((node) => node.type === 'input' && node.props.type === 'checkbox'))
+  const locked = nodes(T.EventRulesEditor({ value, t: (key) => key, writable: false, onChange() { throw new Error('read-only') } }))
+  assert.equal(button(locked, 'eventAddRule').props.disabled, true)
+})
+
+test('事件界面显示实时等待、思考和回复状态，工具执行时仍显示工具状态', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  T.resetEventSession('main', true)
+  T.updateNativeActivity({ runningCalls: [] }, 1)
+  const t = (key) => T.DICTIONARIES.zh[key] ?? key
+  const props = { value: T.normalizeFlair(T.DEFAULT_FLAIR), writable: true, onChange() {}, t }
+  const findStatus = (node) => {
+    if (Array.isArray(node)) return node.map(findStatus).find(Boolean)
+    if (!node || typeof node !== 'object') return undefined
+    if (node.props?.role === 'status') return node
+    return findStatus(node.props?.children)
+  }
+  const status = () => collect(findStatus(T.EventRulesEditor(props))).map((item) => item.text ?? '').join('')
+  const chunk = (type, index, text) => T.consumeLiveChange({ kind: 'append', entries: [{ type: 'transient', event: { type: 'assistant/live-chunk', data: { turn: 1, step: 1, attemptId: 'a', chunk: { type, index, text } } } }] })
+  try {
+    assert.ok(status().includes('输出状态：等待响应'))
+    chunk('reasoning-delta', 0, '推理')
+    assert.ok(status().includes('输出状态：思考中（显式推理）'))
+    chunk('text-delta', 1, '正文')
+    assert.ok(status().includes('输出状态：回复中（可见正文）'))
+    T.updateNativeActivity({ legacy: { runningCalls: [{ callId: 'one', name: 'read', turn: 1, phase: 'start' }] } }, 1)
+    assert.ok(status().includes('输出状态：工具执行中'))
+    const allText = collect(T.EventRulesEditor(props)).map((item) => item.text ?? '').join('')
+    assert.ok(allText.includes('已识别的工具活动：读取文件'))
+  } finally { T.resetRun() }
+})
+
+test('规则与分组页签有独立内容区和局部操作栏，键盘切换同步选择与焦点', async () => {
+  const { dom, react } = await loadClient()
+  reset(dom)
+  const original = react.useState
+  let tab = 'rules', hook = 0
+  react.useState = (initial) => {
+    const slot = hook++
+    return [slot === 0 ? tab : initial, (next) => { if (slot === 0) tab = next }]
+  }
+  const nodes = (tree, out = []) => { if (Array.isArray(tree)) tree.forEach((v) => nodes(v, out)); else if (tree && typeof tree === 'object') { out.push(tree); nodes(tree.props?.children, out) } return out }
+  const props = { value: T.normalizeFlair(T.DEFAULT_FLAIR), t: (key) => key, writable: true, onChange() {} }
+  const render = () => { hook = 0; return nodes(T.EventRulesEditor(props)) }
+  const texts = (tree) => nodes(tree).flatMap((n) => n.props?.children ?? []).filter((n) => typeof n === 'string')
+  try {
+    let tree = render()
+    let tabs = tree.filter((n) => n.props.role === 'tab')
+    let panel = tree.find((n) => n.props.role === 'tabpanel')
+    assert.equal(tabs.length, 2)
+    assert.equal(tabs.filter((n) => n.props['aria-selected']).length, 1)
+    assert.equal(tabs[0].props.tabIndex, 0)
+    assert.equal(tabs[1].props.tabIndex, -1)
+    assert.equal(tabs[0].props['aria-controls'], panel.props.id)
+    assert.equal(panel.props['aria-labelledby'], tabs[0].props.id)
+    const toolbar = nodes(panel).find((n) => n.props.className === 'dshsf-event-toolbar')
+    assert.ok(texts(toolbar).includes('eventRulesPanelTitle'))
+    assert.ok(texts(toolbar).includes('eventAddRule'))
+    assert.ok(!texts(panel).includes('eventAddGroup'))
+    tabs[1].props.onClick()
+    tree = render()
+    tabs = tree.filter((n) => n.props.role === 'tab')
+    panel = tree.find((n) => n.props.role === 'tabpanel')
+    assert.equal(tabs[1].props['aria-selected'], true)
+    assert.equal(panel.props['aria-labelledby'], tabs[1].props.id)
+    assert.ok(texts(panel).includes('eventGroupsPanelTitle'))
+    assert.ok(texts(panel).includes('eventAddGroup'))
+    assert.ok(!texts(panel).includes('eventAddRule'))
+    let prevented = false, focused = ''
+    tabs[1].props.onKeyDown({ key: 'ArrowRight', preventDefault() { prevented = true }, currentTarget: { parentElement: { querySelector(selector) { focused = selector; return { focus() {} } } } } })
+    assert.equal(tab, 'rules')
+    assert.equal(prevented, true)
+    assert.match(focused, /rules/)
+  } finally { react.useState = original }
+})
+
+test('默认选择与事件规则同级切换，默认页先打开且不会切换生效配置', async () => {
+  const { dom, react } = await loadClient()
+  reset(dom)
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(T.DEFAULT_FLAIR) }) } })
+  module.apply(host.ctx)
+  const original = react.useState
+  let active = 'default'
+  react.useState = (initial) => initial === 'default' ? [active, (next) => { active = next }] : original(initial)
+  const nodes = (tree, out = []) => { if (Array.isArray(tree)) tree.forEach((v) => nodes(v, out)); else if (tree && typeof tree === 'object') { out.push(tree); nodes(tree.props?.children, out) } return out }
+  const render = () => nodes(T.StatusFlairSection({ t: (key) => key }))
+  try {
+    const before = plain(T.currentFlair())
+    let tree = render()
+    const tabs = tree.filter((n) => n.props['data-strategy-tab'])
+    assert.deepEqual(tabs.map((n) => n.props['data-strategy-tab']), ['default', 'events'])
+    assert.equal(tabs[0].props['aria-selected'], true)
+    let panels = tree.filter((n) => n.props.className?.includes('dshsf-strategy-panel'))
+    assert.equal(panels[0].props.hidden, false)
+    assert.equal(panels[1].props.hidden, true)
+    assert.equal(panels[0].props['aria-labelledby'], tabs[0].props.id)
+    assert.equal(panels[1].props['aria-labelledby'], tabs[1].props.id)
+    assert.ok(nodes(panels[0]).some((n) => n.props.className === 'dshsf-card-title' && n.props.children.includes('modeTitle')))
+    assert.ok(nodes(panels[1]).some((n) => n.type === T.EventRulesEditor))
+    assert.equal(tree.filter((n) => n.type === T.EventRulesEditor).length, 1)
+    tabs[1].props.onClick()
+    tree = render(); panels = tree.filter((n) => n.props.className?.includes('dshsf-strategy-panel'))
+    assert.equal(panels[0].props.hidden, true)
+    assert.equal(panels[1].props.hidden, false)
+    assert.deepEqual(plain(T.currentFlair()), before)
+    let focused = ''
+    const eventsTab = tree.find((n) => n.props['data-strategy-tab'] === 'events')
+    eventsTab.props.onKeyDown({ key: 'Home', preventDefault() {}, currentTarget: { parentElement: { querySelector(selector) { focused = selector; return { focus() {} } } } } })
+    assert.equal(active, 'default')
+    assert.match(focused, /default/)
+    const timing = tree.find((n) => n.props.className === 'dshsf-card-title' && n.props.children.includes('triggersTitle'))
+    assert.ok(timing)
+    assert.ok(!panels.some((p) => nodes(p).includes(timing)), 'global rotation timing is shared, not hidden in one strategy panel')
+  } finally { react.useState = original; host.dispose() }
+})
+
+
+test('收起的规则仍可启用和排序，快捷操作不位于折叠内容中', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  let changed
+  const value = T.normalizeFlair(T.DEFAULT_FLAIR)
+  const nodes = (tree, out = []) => { if (Array.isArray(tree)) tree.forEach((v) => nodes(v, out)); else if (tree && typeof tree === 'object') { out.push(tree); nodes(tree.props?.children, out) } return out }
+  const tree = nodes(T.EventRulesEditor({ value, t: (key) => key, writable: true, onChange: (next) => { changed = next } }))
+  const items = tree.filter((n) => n.type === 'article' && n.props.className.includes('dshsf-rule-item'))
+  assert.equal(items.length, 4)
+  for (const item of items) {
+    const descendants = nodes(item)
+    const details = descendants.find((n) => n.type === 'details')
+    assert.notEqual(details.props.open, true)
+    const actions = descendants.find((n) => n.props.className === 'dshsf-rule-actions')
+    assert.ok(actions)
+    assert.ok(!nodes(details).includes(actions), 'quick actions must not disappear with the detail body')
+    assert.equal(nodes(actions).filter((n) => n.type === 'input' && n.props.type === 'checkbox').length, 1)
+    assert.equal(nodes(actions).filter((n) => n.type === 'button').length, 2)
+  }
+  const firstActions = nodes(items[0]).find((n) => n.props.className === 'dshsf-rule-actions')
+  const enable = nodes(firstActions).find((n) => n.type === 'input')
+  enable.props.onChange({ target: { checked: false } })
+  assert.equal(changed.eventRules.rules[0].enabled, false)
+  assert.equal(changed.eventRules.enabled, false, 'individual edit does not turn on the master switch')
+  const secondActions = nodes(items[1]).find((n) => n.props.className === 'dshsf-rule-actions')
+  nodes(secondActions).find((n) => n.type === 'button' && n.props.children.includes('eventMoveUp')).props.onClick()
+  assert.equal(changed.eventRules.rules[0].id, value.eventRules.rules[1].id)
+})
+
+test('入门规则只补缺少的条目，新项使用DSH自带选择但不覆盖已有配置', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const nodes = (tree, out = []) => { if (Array.isArray(tree)) tree.forEach((v) => nodes(v, out)); else if (tree && typeof tree === 'object') { out.push(tree); nodes(tree.props?.children, out) } return out }
+  const base = T.normalizeFlair(withTextPresets())
+  base.selection.fixedPresetId = 'violet'
+  const starter = T.createStarterRules()[0]
+  starter.name = 'My interaction'; starter.nameKey = ''
+  starter.selection.fixedPresetId = 'terminal'
+  let value = T.normalizeFlair({ ...base, eventRules: { enabled: false, rules: [starter] } }), changed
+  const render = () => nodes(T.EventRulesEditor({ value, t: (key) => key, writable: true, onChange: (next) => { changed = next } }))
+  const button = render().find((n) => n.type === 'button' && n.props.children.includes('eventAddStarters'))
+  assert.equal(button.props.disabled, false)
+  button.props.onClick()
+  assert.equal(changed.eventRules.rules.length, 4)
+  assert.deepEqual(changed.eventRules.rules[0], starter)
+  assert.equal(changed.eventRules.enabled, false)
+  for (const r of changed.eventRules.rules.slice(1)) {
+    assert.equal(r.selection.fixedPresetId, T.DEFAULT_ID)
+    assert.equal(r.selection.fixedTextPresetId, T.DEFAULT_ID)
+    assert.deepEqual(r.selection.presetIds, [T.DEFAULT_ID])
+    assert.deepEqual(r.selection.textPresetIds, [T.DEFAULT_ID])
+  }
+  assert.equal(changed.selection.fixedPresetId, 'violet', 'global selection is not changed')
+  assert.notEqual(changed.eventRules.rules[1].selection.presetIds, changed.eventRules.rules[2].selection.presetIds)
+  value = T.normalizeFlair(changed)
+  assert.equal(render().find((n) => n.type === 'button' && n.props.children.includes('eventAddStarters')).props.disabled, true)
+})
+
+test('入门规则按固定身份补缺：首次四条、已有两条补两条、齐全后禁用', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const nodes = (tree, out = []) => { if (Array.isArray(tree)) tree.forEach((v) => nodes(v, out)); else if (tree && typeof tree === 'object') { out.push(tree); nodes(tree.props?.children, out) } return out }
+  const base = T.normalizeFlair(T.DEFAULT_FLAIR)
+  for (const [present, customCount, expectedAdded] of [[0, 0, 4], [2, 0, 2], [4, 0, 0], [0, 1, 4]]) {
+    const existing = T.createStarterRules().slice(0, present)
+    if (customCount) existing.push({ ...T.createStarterRules()[0], id: 'custom', name: 'My own rule', nameKey: '' })
+    let value = T.normalizeFlair({ ...base, eventRules: { enabled: false, rules: existing } }), changed
+    const render = () => nodes(T.EventRulesEditor({ value, t: (key) => key, writable: true, onChange: (next) => { changed = next } }))
+    const add = render().find((n) => n.type === 'button' && n.props.children.includes('eventAddStarters'))
+    assert.equal(add.props.disabled, expectedAdded === 0)
+    if (!expectedAdded) continue
+    add.props.onClick()
+    assert.equal(changed.eventRules.rules.length - existing.length, expectedAdded)
+    assert.deepEqual(changed.eventRules.rules.slice(0, existing.length), value.eventRules.rules)
+    assert.equal(changed.eventRules.enabled, false)
+    value = T.normalizeFlair(changed)
+    assert.equal(render().find((n) => n.type === 'button' && n.props.children.includes('eventAddStarters')).props.disabled, true)
+  }
+})
+
+test('入门规则名称随语言切换，手动改名后保持自定义名称', async () => {
+  await loadClient()
+  const rules = T.createStarterRules()
+  const zh = (key) => T.DICTIONARIES.zh[key] ?? key
+  const en = (key) => T.DICTIONARIES.en[key] ?? key
+  assert.equal(T.eventRuleLabel(rules[0], zh), '思考与交互')
+  assert.equal(T.eventRuleLabel(rules[0], en), 'Thinking and interaction')
+  assert.equal(T.eventRuleLabel({ ...rules[0], name: 'Custom name', nameKey: '' }, en), 'Custom name')
+})
+
+test('事件分组界面：内置可复制，自定义工具可编辑，被引用分组禁止删除', async () => {
+  const { dom, react } = await loadClient()
+  reset(dom)
+  const original = react.useState
+  let hooks = 0, changed
+  react.useState = () => [hooks++ === 0 ? 'groups' : null, () => {}]
+  const nodes = (tree, out = []) => { if (Array.isArray(tree)) tree.forEach((v) => nodes(v, out)); else if (tree && typeof tree === 'object') { out.push(tree); nodes(tree.props?.children, out) } return out }
+  try {
+    const custom = { id: 'reading', name: 'Reading', kind: 'activity', activityKinds: ['read'], toolNames: ['custom_read'], events: [] }
+    const value = T.normalizeFlair({ ...withTextPresets(), eventGroups: [custom], eventRules: { enabled: true, rules: [{ id: 'r', name: 'R', kind: 'activity', groupIds: ['reading'], selection: withTextPresets().selection }] } })
+    const tree = nodes(T.EventRulesEditor({ value, t: (key) => key, writable: true, onChange: (next) => { changed = next } }))
+    const copy = tree.find((n) => n.type === 'button' && n.props.children.includes('copy'))
+    copy.props.onClick()
+    assert.equal(changed.eventGroups.length, 2)
+    assert.ok(!changed.eventGroups[1].id.startsWith('builtin:'))
+    const remove = tree.find((n) => n.type === 'button' && n.props.children.includes('remove'))
+    assert.equal(remove.props.disabled, true)
+    const textarea = tree.find((n) => n.type === 'textarea')
+    textarea.props.onBlur({ target: { value: 'custom_read\ncustom_search' } })
+    assert.deepEqual(changed.eventGroups[0].toolNames, ['custom_read', 'custom_search'])
+  } finally { react.useState = original }
+})
+
+test('真实配置迟到：禁用不会重新激活；关闭每轮触发也不能保留占位抽签', async () => {
+  const { dom } = await loadClient()
+  for (const disabled of [false, true]) {
+    reset(dom)
+    let snapshot = { status: 'loading', value: undefined, writable: true }
+    const listeners = new Set()
+    const form = { getSnapshot: () => snapshot, subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn) } }
+    const host = createCtx({ forms: { get: () => form } })
+    module.apply(host.ctx)
+    try {
+      host.locale.translate('chat', 'chat.deepDiving')
+      const ready = withTextPresets()
+      ready.enabled = !disabled
+      ready.triggers = { look: { turn: { enabled: false } }, text: { turn: { enabled: false } } }
+      snapshot = { status: 'ready', value: { flair: ready }, writable: true }
+      for (const fn of listeners) fn()
+      if (disabled) {
+        assert.equal(T.run.active, false)
+        assert.equal(dom.attrs.has(T.ACTIVE_ATTR), false)
+      } else assert.equal(T.run.textPresetId, 'text-golden')
+    } finally { host.dispose() }
+  }
+})
+
+test('事件模式下密集步骤合并一次，结束后不会执行延迟抽签', async (context) => {
+  const { dom } = await loadClient()
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 10000 })
+  reset(dom)
+  const value = withTextPresets()
+  value.selection.textMode = 'sequential'
+  value.eventRules = { enabled: true, minRefreshMs: 500, rules: [] }
+  value.triggers = { text: { step: { enabled: true, every: 1 } } }
+  T.applyFlair(value)
+  T.resetEventSession('main', true)
+  T.eventState.turn = 1
+  T.rollRun()
+  try {
+    const first = T.run.text
+    T.onStepStart(); T.onStepStart()
+    assert.equal(T.run.text, first)
+    context.mock.timers.tick(500)
+    assert.notEqual(T.run.text, first)
+    const second = T.run.text
+    T.onStepStart()
+    T.stopRun()
+    context.mock.timers.tick(1000)
+    assert.equal(T.run.text, second)
+  } finally { T.stopRun(); context.mock.timers.reset() }
+})
+
+test('文案更新用私有字典修订通知渲染，不改变语言、不写宿主配置', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const form = createForm({ flair: plain(withTextPresets()) })
+  const host = createCtx({ forms: { get: () => form } })
+  module.apply(host.ctx)
+  try {
+    T.rollRun()
+    await Promise.resolve()
+    const runtime = host.dictionaries.filter((d) => d.ns.endsWith('.running-copy'))
+    assert.ok(runtime.length > 0)
+    assert.equal(runtime.at(-1).dicts.zh.label, T.run.text)
+    assert.equal(form.writes.length, 0)
+  } finally { host.dispose() }
 })
 
 test('扫光面板预览：两种主题字段各按自己的主题取自动色', async () => {

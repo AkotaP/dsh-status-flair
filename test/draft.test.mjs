@@ -157,6 +157,55 @@ async function loadPluginWithReact(react, dom) {
   }
 }
 
+test('策略页签切换保留草稿，不自动保存或切换规则总开关', async () => {
+  const dom = createDom(), mini = createMiniReact()
+  const loaded = await loadPluginWithReact(mini.React, dom)
+  let host
+  try {
+    const T = loaded.module.__test
+    const plain = (value) => JSON.parse(JSON.stringify(value))
+    const form = createForm({ flair: plain(T.DEFAULT_FLAIR) })
+    host = createCtx({ forms: { get: () => form } })
+    loaded.module.apply(host.ctx)
+    mini.mount(T.StatusFlairSection, { t: (key) => key })
+    const tab = (id) => findBy(mini.tree, (n) => n.props?.['data-strategy-tab'] === id)
+    const panel = (id) => findBy(mini.tree, (n) => n.props?.role === 'tabpanel' && n.props?.id?.endsWith('-' + id + '-panel'))
+    const editor = () => findBy(mini.tree, (n) => n.type === T.EventRulesEditor)
+    const button = (label) => findBy(mini.tree, (n) => n.type === 'button' && textOf(n) === label)
+    assert.equal(panel('default').props.hidden, false)
+    assert.equal(panel('events').props.hidden, true)
+    tab('events').props.onClick(); mini.rerender()
+    assert.equal(panel('events').props.hidden, false)
+    const changed = plain(editor().props.value)
+    changed.eventRules.enabled = true
+    changed.eventRules.rules[0].name = 'Draft interaction'
+    changed.eventRules.rules[0].nameKey = ''
+    editor().props.onChange(changed); mini.rerender()
+    tab('default').props.onClick(); mini.rerender()
+    assert.equal(panel('default').props.hidden, false)
+    assert.equal(editor().props.value.eventRules.enabled, true)
+    assert.equal(editor().props.value.eventRules.rules[0].name, 'Draft interaction')
+    assert.equal(form.writes.length, 0)
+    tab('events').props.onClick(); mini.rerender()
+    assert.equal(editor().props.value.eventRules.rules[0].name, 'Draft interaction')
+    await button('saveChanges').props.onClick(); mini.rerender()
+    assert.equal(form.writes.length, 1)
+    assert.equal(form.writes[0].value.eventRules.rules[0].name, 'Draft interaction')
+    const unsaved = plain(editor().props.value)
+    unsaved.eventRules.rules[0].name = 'Unsaved'
+    editor().props.onChange(unsaved); mini.rerender()
+    tab('default').props.onClick(); mini.rerender()
+    button('discard').props.onClick(); mini.rerender()
+    assert.equal(panel('default').props.hidden, false)
+    assert.equal(editor().props.value.eventRules.rules[0].name, 'Draft interaction')
+    assert.equal(form.writes.length, 1)
+  } finally {
+    mini.unmount()
+    host?.dispose()
+    loaded.restore()
+  }
+})
+
 test('草稿模式：调整只在页内生效，点保存才写宿主，放弃可回退', async () => {
   const dom = createDom()
   const mini = createMiniReact()

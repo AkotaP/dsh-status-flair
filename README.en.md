@@ -2,6 +2,8 @@
 
 [中文](README.md) | English
 
+**Plugin version: 0.3.0 — not released.**
+
 A DeepSeek Harness (DSH) **web** plugin for restyling the chat's running status row.
 
 Turn "Deep diving for 7s ···" into whatever you like: copy, colour, size, icon and shimmer speed.
@@ -28,9 +30,9 @@ Selectors use stable hooks only: `[data-chat-running]`, `[data-shimmer]`, `:has(
   - Look: one fixed preset, or a random draw from the candidates;
   - Copy: first fix or randomly draw a **group**, then take one line inside it by "always the first / random / rotate in order".
 
-So "random look + random copy" does not conflict: each run draws a look, then a text group, then a line; the three random sources are independent. Splitting the copy randomness into two layers is the core of this design.
+The look, text group and line within the group are selected independently, so random looks and random copy can be combined.
 
-**Random timing**: the draw happens once when a new thinking run starts and stays fixed for that run. When the running row disappears the run is over and the next one draws again, so the copy never changes mid-run.
+**Switch timing**: global `triggers` are configured separately for looks and copy. Each layer draws once per turn by default; optional fixed/random time intervals or every-N-step triggers can re-draw it during a turn. Disabling a layer’s per-turn trigger keeps its previous selection until another trigger fires. When event policies are enabled, matching rules can also change the active selection strategy.
 
 ## Default means "take DSH's own"
 
@@ -41,6 +43,78 @@ Looks and copy each have a `default` entry (shown as "Default (DSH)" in the UI).
 - This id is not a stored preset; the plugin never copies the official colour/size/whale/copy, so DSH upgrades flow through automatically.
 - The settings preview reads `--dsw-alias-label-deep-diving`, `--dsh-content-font-size` and the official locale strings live; the default look preview also pulls the official whale mask (APNG data URL) out of the stylesheets DSH injected, animation included.
 - **The shipped configuration contains the three look presets only, no text groups**: on first run the copy comes from DSH's official running row. Create a text group when you want custom copy.
+
+## Event policies (0.3.0)
+
+Version 0.3.0 adds event rules, custom groups and live output phases. The existing screenshot illustrates the older layout, not the new sibling tabs and rule controls.
+
+### Groups
+
+- **Activity (`activity`)** follows DSH’s 14 native activity categories: `thinking`, `read`, `readImage`, `search`, `write`, `edit`, `commands`, `code`, `webSearch`, `webFetch`, `subagents`, `plan`, `questions` and `tools`.
+- **Pulse (`pulse`)** represents a tool result: `tool-error` or `tool-success`.
+- Built-in groups are virtual client-side entries: activity IDs are `builtin:<activity-kind>`; result IDs are `builtin:tool-error` and `builtin:tool-success`. They are not stored in `eventGroups`.
+- A custom group contains `id`, `name`, `kind`, `activityKinds`, `toolNames` and `events`. An activity group matches a native category **or** a specific tool name; tool names use exact matching. A pulse group matches a result type, optionally restricted to its listed tool names.
+- A rule and its groups must have the same `kind`; activity and result groups cannot be mixed. Unknown extension tools generally fall under `tools`. A custom group with specific tool names distinguishes them without assuming automatic mapping to native categories.
+
+Tool activity comes from the current Chat snapshot’s `legacy.runningCalls`, recursively including running PTC subcalls. The editor shows **Detected tool activities** to distinguish missing activity, rule-order overrides and ungrouped plugin tools. Outer code execution and inner file reads can coexist; the first matching rule still wins, and very short subcalls may be coalesced by the minimum refresh interval. Plugin tool names are not hardcoded as native capabilities; use exact-name custom groups.
+
+### Output phases
+
+While a turn is open and no tool is running, three built-in groups are available:
+
+- `builtin:waiting`: no current output evidence, or the output block, attempt or step has ended.
+- `builtin:thinking`: nonblank explicit reasoning deltas from the current attempt; hidden reasoning is never inferred.
+- `builtin:responding`: nonblank visible text deltas from the current attempt, including commentary rather than necessarily the final answer.
+
+Phases use live deltas from the existing main-session source, never historical text or the tail of `partial.blocks`. Block ends, finish, settlement, retries and session changes clear evidence. Initial attachment and reconnect recovery wait for fresh signals. No extra timeout guesses the phase during token gaps. Running tools continue to match tool categories.
+
+Custom activity groups may also include `waiting` and `responding` in `activityKinds`. `thinking` no longer means every tool-free state; select all three groups in a rule to cover every tool-free state.
+
+### Rules and switching
+
+Rules are evaluated in list order; only the first enabled, valid matching rule applies, without combining rules. Multiple groups referenced by one rule use OR matching. With no matching rule, the global `selection` applies.
+
+Each rule contains `id`, `name`, `enabled` (default `true`), `kind`, `groupIds`, `holdMs` (default 2000ms) and a complete `selection`:
+
+- Look: `presetMode`, `fixedPresetId`, `presetIds`;
+- Text group: `textPresetMode`, `fixedTextPresetId`, `textPresetIds`;
+- Line within the group: `textMode` (`first` / `random` / `sequential`).
+
+Rules reuse existing look and text presets, including the official `default` sentinel, without copying official assets. Rules inherit global `triggers` rather than defining their own. `holdMs` sets the pulse matching window; `minRefreshMs` sets the minimum interval between event-driven refreshes, defaulting to 3000ms (3 seconds), not a periodic three-second switch. Explicitly saved intervals are preserved. List order determines priority: a result rule that must take precedence belongs before activity rules that could also match.
+
+Within the same session turn, a temporary status-row unmount or remount does not reset rule timing or redraw copy. While the shared source reports an open turn, actual session events determine termination and cleanup; row disappearance is only a fallback when that source is unavailable.
+
+### Defaults and lifecycle
+
+The top-level **Default selection** and **Event rules and groups** tabs are siblings, with Default selection open initially. Switching only changes visibility; it does not change enablement or discard drafts. Switch timing, previews and preset libraries remain shared. A collapsed rule still exposes its enable and move controls; expand it to edit the configuration.
+
+Fresh configurations include four editable starter rules, with the master switch still off:
+
+| Rule | Included activity |
+|---|---|
+| Thinking and interaction | Waiting, explicit reasoning, questions, todos and goals |
+| Information gathering | File and image reads, search, web search and fetch |
+| Execution and operations | Writes, edits, commands, code, subagents and other tools |
+| Reply | Visible text output, including commentary |
+
+Every initial or newly added starter selects DSH’s own look and copy (`default`), independently of the global selection. Existing rules and an explicit empty `rules: []` remain untouched. **Add starter rules** fills only missing stable IDs: four when none exist, two when two starters exist, and no additions once all four are present. Custom rules are separate and preserved; renaming a starter does not cause a duplicate. Existing choices and the master switch stay unchanged. Shipped names follow the interface language until manually renamed.
+
+The minimum `flair` configuration below omits `rules` to receive the four starters. Existing configurations are not automatically enabled:
+
+```json
+{
+  "eventGroups": [],
+  "eventRules": { "enabled": false, "minRefreshMs": 3000 }
+}
+```
+
+Event processing uses only the current main session’s existing shared event source. It opens no new `follow` stream and adds no host-side session subscriptions. History loading and reconnect recovery do not replay tool-result pulses. If the source is unavailable, the original global strategy remains in use.
+
+The plugin page adds **Event rules and groups**: add and reorder rules in **Event rules**, or copy built-ins and create groups in **Manage groups**. Enter exact tool names one per line; edits apply on blur. Remove rule references before deleting a group. Sampling a rule affects only its local preview, not the real sequence cursor.
+
+`tool-error` / `tool-success` follow DSH’s structured tool error flag, not parsed command output; a nonzero command exit is not necessarily a tool error.
+
+Groups and rules use the same in-page draft and explicit-save workflow: editing alone does not persist them; only **Save changes** writes configuration. Discarding or leaving the page reverts unsaved edits. The health route adds only the custom-group count and the rule count, enabled count and master switch, not group or rule contents.
 
 ## Details
 

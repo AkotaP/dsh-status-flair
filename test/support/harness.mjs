@@ -219,6 +219,7 @@ export function createCtx(options = {}) {
       if (name === 'configForms') return options.forms
       if (name === 'theme') return options.theme
       if (name === 'uiConversation') return options.uiConversation
+      if (name === 'sessions') return options.sessions
       return undefined
     },
     /** 可选依赖注入：和 cordis 一样，依赖齐全时同步回调，否则什么都不做。 */
