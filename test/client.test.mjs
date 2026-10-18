@@ -756,6 +756,23 @@ test('鲸鱼图标：复用官方 APNG 遮罩，颜色与文字扫光仍由预�
   assert.equal(T.iconMaskUri(T.normalizeStyle({ icon: 'whale' })), T.iconDataUri('sparkles'))
 })
 
+test('设置镜像就绪前不闪出出厂外观（暖金色）', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  let snapshot = { status: 'loading', value: undefined, writable: true, revision: 0 }
+  const listeners = new Set()
+  const form = { getSnapshot: () => snapshot, subscribe(l) { listeners.add(l); return () => listeners.delete(l) }, async set() { return true } }
+  const host = createCtx({ forms: { get: () => form } })
+  module.apply(host.ctx)
+  try {
+    const vars = dom.vars
+    assert.equal(vars.has('--dsh-sf-color'), false, 'no shipped preset colour before real config')
+    assert.equal(dom.attrs.has(T.ACTIVE_ATTR), false, 'DSH keeps its own look until config arrives')
+    dom.setRunning(true)
+    assert.equal(host.locale.translate('chat', 'chat.deepDivingFor', { duration: '1秒' }), 'ORIGINAL(chat:chat.deepDivingFor)')
+    assert.equal(vars.has('--dsh-sf-color'), false, 'placeholder run must not paint 暖金色 either')
+  } finally { host.dispose() }
+})
 test('配置迟到：首轮已抽签时，真实配置到位后立即重抽文案', async () => {
   const { dom } = await loadClient()
   reset(dom)

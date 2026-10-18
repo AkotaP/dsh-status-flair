@@ -1,6 +1,6 @@
 {
   "name": "dsh-status-flair",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "DSH web plugin: event-driven running status with custom event groups, live output phases, independent look/text rotation, and DSH-native defaults.",
   "type": "module",
   "main": "lib/index.js",
@@ -75,7 +75,8 @@
         "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-api-session-controller",
         "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-chat"
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-connection"
       ]
     }
   }

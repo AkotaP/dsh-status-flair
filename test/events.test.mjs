@@ -417,6 +417,21 @@ test.describe('event policy engine', { concurrency: false }, () => {
     assert.equal(T.run.presetId, 'violet')
   })
 
+  test('a config notification cannot briefly paint the base look while the row is still running', (t) => {
+    const value = config([rule('reading', 'activity', ['builtin:read'], { selection: selection({ fixedPresetId: 'violet' }) })])
+    value.selection = selection({ presetMode: 'random', presetIds: ['golden', 'terminal'] })
+    activate(value, [call('read', 'read')])
+    const painted = () => dom.document.documentElement.style.getPropertyValue('--dsh-sf-color')
+    assert.equal(T.run.presetId, 'violet')
+    const before = painted()
+    // Settings mirror notifications arrive while the row stays mounted, even if
+    // the plugin's own run flag was momentarily cleared.
+    T.stopRun()
+    T.applyFlair(value)
+    assert.equal(painted(), before, 'must not paint the base look while the row is still mounted')
+    assert.equal(T.run.presetId, 'violet')
+  })
+
   test('activity rule changes respect minRefreshMs and apply the latest state', (t) => {
     const value = config([
       rule('reading', 'activity', ['builtin:read']),

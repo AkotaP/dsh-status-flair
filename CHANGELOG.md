@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. The format foll
 
 No version has been released yet, so the entries below carry no release dates.
 
+## [0.4.0] — not released
+
+### Added
+
+- **Profile-scoped independent JSON storage**: move large flair data out of the main configuration, preserve raw and effective migration backups, and install only a lightweight file-storage marker. Opening the page never writes; cleanup requires explicit confirmation and verified, unchanged source data.
+- **Durable saves and recovery boundaries**: serialized same-host saves, captured draft revision checks, atomic file replacement, idempotent operation receipts, fail-closed corrupt/missing-file behavior, and visible cleanup retries. No cross-process atomic CAS is claimed.
+- **Configuration sharing**: import a configuration shared by another user as an in-page draft with a count summary; invalid or foreign documents are rejected. Custom icons travel as embedded `data:` URLs rather than file paths.
+- **Storage controls**: back up the current configuration to a file, prompt for that manual backup during migration, and retain edits made while a previous save is in flight. Data polling and focus refresh synchronize browser pages. Legacy fields are no longer volatile-writable.
+
+Version 0.4.0 is not released. No actual profile migration or service operation was performed while developing it.
+
+### Fixed
+
+- **Shipped-look flash before configuration arrives**: the pre-config placeholder used to paint the factory look, briefly flashing 暖金色 on load and on every hot reload. It now leaves DSH’s own styling in place until the real configuration applies.
+- **Rule look overwritten by settings notifications**: a settings-mirror update while the plugin’s run flag was momentarily empty repainted the base selection. It now re-applies the matching event rule, and theme changes only repaint the preset already on screen.
+
 ## [0.3.0] — not released
 
 ### Added

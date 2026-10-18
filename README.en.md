@@ -2,7 +2,9 @@
 
 [中文](README.md) | English
 
-**Plugin version: 0.3.0 — not released.**
+**Plugin version: 0.4.0 — not released.**
+
+Version 0.4.0 moves large configuration into a plugin-owned file and adds import and backup. Actual profiles are not automatically migrated; see [migration notes](<docs/storage-migration.md>) (Chinese).
 
 A DeepSeek Harness (DSH) **web** plugin for restyling the chat's running status row.
 
@@ -99,7 +101,7 @@ Fresh configurations include four editable starter rules, with the master switch
 
 Every initial or newly added starter selects DSH’s own look and copy (`default`), independently of the global selection. Existing rules and an explicit empty `rules: []` remain untouched. **Add starter rules** fills only missing stable IDs: four when none exist, two when two starters exist, and no additions once all four are present. Custom rules are separate and preserved; renaming a starter does not cause a duplicate. Existing choices and the master switch stay unchanged. Shipped names follow the interface language until manually renamed.
 
-The minimum `flair` configuration below omits `rules` to receive the four starters. Existing configurations are not automatically enabled:
+The example below illustrates event fields inside the stored `flair` data, not the DSH main configuration or a complete internal storage document. Omitting `rules` supplies the four starters; existing configurations are not automatically enabled:
 
 ```json
 {
@@ -146,7 +148,9 @@ The plugin ships both `zh` and `en` dictionaries and follows the DSH language se
 - create / edit / duplicate / delete for looks and text groups;
 - **Save changes / Discard changes** at the top and the bottom.
 
-Writes go through `ctx.configForms` (the volatile configuration channel); a failed save is shown explicitly.
+The development version saves through an authenticated DSH plugin endpoint to `<profile-dir>/dsh-status-flair/settings.json`. The first save retains the original migration backup and installs a lightweight `storage: file` marker. Legacy `flair` remains read-compatible but is no longer volatile-writable. Removing the old main-config block requires explicit migration confirmation.
+
+The data panel backs up the current configuration to a file and imports configuration shared by others. Migration prompts for a manual backup first. Import accepts only this plugin’s looks, copy and rules; the content becomes an in-page draft with a count summary and is persisted only by **Save changes**. Invalid JSON or another plugin’s document is rejected without touching the current draft. Custom icons are embedded as `data:image/...;base64`, so exported files carry the image bytes and contain no local file paths. Write failures or cross-page revision conflicts preserve the draft; corrupt files are never silently reset. Editing this repository does not execute a real migration. See [migration notes](<docs/storage-migration.md>).
 
 ![Configuration UI](docs/img/UI.png)
 
@@ -178,7 +182,7 @@ After installing, **restart DSH**; the **Status flair** plugin page shows the co
 
 - **The look is pure CSS overrides**: the plugin never takes over rendering the running row. While enabled it marks `<html>` and writes a few CSS variables; DSH's own component keeps working. With the default look, not even the marker is set.
 - **The copy is one `translate` wrapper**: it intercepts only `chat.deepDiving` / `chat.deepDivingFor` and passes every other namespace/key through; with the default copy it simply passes through.
-- **Configuration uses the volatile channel**: the host half declares the schema; `ctx.configForms` projects and writes the config live. It also serves a read-only `GET /status-flair/health` (including a browser-client heartbeat) for verifying an installation without a browser.
+- **Independent persistence**: profile-scoped JSON is saved through an authenticated owner-only endpoint, with same-host revision checks protecting edits from multiple pages. Legacy configuration is read-compatible and cleanup requires confirmation. An older host can use the legacy form fallback without offering migration. Read-only `GET /status-flair/health` still exposes summaries only.
 - **Defaults copy nothing**: the official colour/size come from CSS variables, the whale mask from stylesheets DSH injected, the official copy from the locale; DSH upgrades flow through.
 - **Icons are masks**: built-in SVG, the official APNG whale and custom SVG/PNG all contribute only their alpha shape; colour comes from the preset, shimmer and size follow the row.
 - **Legacy migration**: old `presets[].texts` is migrated into independent `textPresets` on first read; the golden preset's old name 暖金色思考 becomes 暖金色.
