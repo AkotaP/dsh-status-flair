@@ -1,6 +1,6 @@
 {
   "name": "dsh-status-flair",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH web plugin: preset-driven running status for the chat — separate look and text-group layers, custom icons, live preview, and a Default that uses DSH's own style and copy.",
   "type": "module",
   "main": "lib/index.js",

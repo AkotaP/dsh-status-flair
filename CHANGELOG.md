@@ -6,6 +6,14 @@ No version has been released yet, so the entries below carry no release dates.
 
 ## [Unreleased]
 
+## [0.2.1] — not released
+
+### Fixed
+
+- **Running row stayed on the placeholder config for a whole boot**: the shared settings mirror notifies subscribers with no argument, but the client read the listener's first parameter as the snapshot. Every notification after `apply()` was therefore mistaken for "not ready" and skipped, so the real profile config never reached the running row — it kept the default look with DSH's own copy until the page reloaded with the document already ready. The client now reads `form.getSnapshot()` on every notification instead of trusting the callback argument.
+- **First frame showed the raw `{duration}` template**: DSH renders the running row with `chat.deepDiving` (no duration) until the turn's start time is known. The custom copy was interpolated with no parameters, so a line such as `…用时{duration}…` appeared verbatim for one frame. When the caller passes no `duration`, the line now renders with a zero duration (`0` + the chat dictionary's second unit, so `0秒` / `0s`) instead of the raw template; the real elapsed time replaces it on the next tick.
+- **First turn after a page load kept DSH's own running copy**: `apply()` paints a placeholder config before the settings mirror delivers the real one. If a run started in that window, the run rolled against the placeholder and the live config was then ignored for the rest of that run — the row showed the default look with DSH's `深度求索中` copy while the settings page showed the configured presets. The first real config now re-rolls the active run once; later config changes still wait for the next run.
+
 ## [0.2.0] — not released
 
 ### Added

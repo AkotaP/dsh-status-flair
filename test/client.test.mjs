@@ -755,3 +755,135 @@ test('鲸鱼图标：复用官方 APNG 遮罩，颜色与文字扫光仍由预�
   // 找不到官方样式时退回内置图标，不报错
   assert.equal(T.iconMaskUri(T.normalizeStyle({ icon: 'whale' })), T.iconDataUri('sparkles'))
 })
+
+test('配置迟到：首轮已抽签时，真实配置到位后立即重抽文案', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+
+  // 设置镜像尚未就绪：快照停在 loading，订阅稍后才补发真实配置。
+  let snapshot = { status: 'loading', value: undefined, writable: true, revision: 0 }
+  const listeners = new Set()
+  const form = {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    async set() {
+      return true
+    },
+  }
+  const host = createCtx({ forms: { get: () => form } })
+  module.apply(host.ctx)
+
+  // 占位 DEFAULT_FLAIR 先抽了签：默认外观 + 官方文案。
+  dom.setRunning(true)
+  assert.equal(host.locale.translate('chat', 'chat.deepDivingFor', { duration: '2秒' }), 'ORIGINAL(chat:chat.deepDivingFor)')
+  assert.equal(T.run.rolled, true, '占位配置已经抽过签')
+
+  // 真实配置迟到送达：同一轮里要作废占位签，换成真实文案组。
+  const ready = withTextPresets()
+  snapshot = { status: 'ready', value: { flair: plain(ready) }, writable: true, revision: 1, base: plain(ready), user: {} }
+  for (const listener of [...listeners]) listener(snapshot)
+
+  assert.equal(T.run.textPresetId, 'text-golden', '首轮重抽后应使用真实文案组')
+  assert.equal(host.locale.translate('chat', 'chat.deepDivingFor', { duration: '2秒' }), '正在认真思考中…', '同一轮立即切到真实文案')
+
+  // 之后的配置变更仍保持本轮不变，只在下一轮生效。
+  const later = withTextPresets()
+  later.textPresets = [{ id: 'text-late', name: '迟到组', texts: ['迟到的第二组'] }]
+  later.selection = selection({ textPresetMode: 'fixed', fixedTextPresetId: 'text-late', textPresetIds: ['text-late'] })
+  snapshot = { ...snapshot, value: { flair: plain(later) }, revision: 2 }
+  for (const listener of [...listeners]) listener(snapshot)
+  assert.equal(host.locale.translate('chat', 'chat.deepDivingFor', { duration: '2秒' }), '正在认真思考中…', '运行中不跳变')
+
+  dom.setRunning(false)
+  dom.triggerMutations()
+  assert.equal(host.locale.translate('chat', 'chat.deepDivingFor', { duration: '2秒' }), '迟到的第二组', '下一轮使用新配置')
+
+  host.dispose()
+})
+
+test('订阅通知不带参数时也要应用配置（共享镜像的通知就是无参回调）', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+
+  // 真实 createSnapshotStore 的通知回调不带参数。旧实现把第一个实参当快照读，
+  // 于是表单 ready 之后每次通知都被误判成 loading 跳过，运行行永远停在占位配置。
+  let snapshot = { status: 'loading', value: undefined, writable: true, revision: 0 }
+  const listeners = new Set()
+  const form = {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    async set() {
+      return true
+    },
+  }
+  const host = createCtx({ forms: { get: () => form } })
+  try {
+    module.apply(host.ctx)
+    assert.equal(T.currentFlair().textPresets.length, 0, '挂载时只有占位配置')
+
+    // 宿主侧配置就绪：先更新快照，再以无参回调通知（与真实 store 一致）。
+    const ready = plain(withTextPresets())
+    snapshot = { status: 'ready', value: { flair: ready }, writable: true, revision: 1, base: { flair: ready }, user: {} }
+    for (const listener of [...listeners]) listener()
+
+    assert.deepEqual(
+      T.currentFlair().textPresets.map((preset) => preset.id),
+      TEXT_PRESETS.map((preset) => preset.id),
+      '无参通知后应读到真实配置',
+    )
+    dom.setRunning(true)
+    assert.equal(host.locale.translate('chat', 'chat.deepDivingFor', { duration: '2秒' }), '正在认真思考中…')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('startTime 未就绪时不显示裸 {duration} 模板（第一帧交还官方文案）', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const templated = withFlair({
+    textPresets: [{ id: 'text-dur', name: '带时长', texts: ['Ciallo～(∠・ω< )⌒★，用时{duration}...'] }],
+    selection: selection({ textPresetMode: 'fixed', fixedTextPresetId: 'text-dur', textPresetIds: ['text-dur'] }),
+  })
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(templated) }) } })
+  try {
+    module.apply(host.ctx)
+    T.resetRun()
+
+    // chat.deepDiving：DSH 还没拿到 startTime，不带 duration —— 按 0 秒插值，文案完整不裸奔
+    // （harness 的 locale 没有 duration.secondUnit 字典，走中性回退 0s）
+    assert.equal(host.locale.translate('chat', 'chat.deepDiving'), 'Ciallo～(∠・ω< )⌒★，用时0s...')
+    // chat.deepDivingFor：带 duration 才用自定义模板
+    assert.equal(
+      host.locale.translate('chat', 'chat.deepDivingFor', { duration: '7秒' }),
+      'Ciallo～(∠・ω< )⌒★，用时7秒...',
+    )
+
+    // 不含占位符的自定义文案在没有参数时照常显示
+    const plainText = withFlair({
+      textPresets: [{ id: 'text-plain', name: '无时长', texts: ['正在思考中…'] }],
+      selection: selection({ textPresetMode: 'fixed', fixedTextPresetId: 'text-plain', textPresetIds: ['text-plain'] }),
+    })
+    T.applyFlair(plainText)
+    T.resetRun()
+    assert.equal(host.locale.translate('chat', 'chat.deepDiving'), '正在思考中…')
+
+    // 模板只剩占位符时，第一帧同样显示 0 值而不是空串（字典缺失 → 中性 0s）
+    T.applyFlair(
+      withFlair({
+        textPresets: [{ id: 'text-only', name: '仅时长', texts: ['{duration}'] }],
+        selection: selection({ textPresetMode: 'fixed', fixedTextPresetId: 'text-only', textPresetIds: ['text-only'] }),
+      }),
+    )
+    T.resetRun()
+    assert.equal(host.locale.translate('chat', 'chat.deepDiving'), '0s')
+  } finally {
+    host.dispose()
+  }
+})
