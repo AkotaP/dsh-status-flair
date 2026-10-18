@@ -6,6 +6,16 @@ No version has been released yet, so the entries below carry no release dates.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-preset sweep colours**: each look preset can set its own shimmer colour for dark and light themes. Leaving a field empty keeps the automatic derivation (mixed toward white on dark themes, toward black on light themes), and the preset editor gains two colour rows, each with a native colour picker, a text field for any CSS colour, and a clear-to-auto button. An empty field previews the automatic colour for *its own* theme, and the rows are plain containers rather than `<label>`s so clicking the empty area cannot open the colour picker.
+- **No-icon option**: a look preset can now set `icon: none`, which hides the running row's icon slot entirely (the preview omits it too) for people who do not want an icon.
+- **Configurable switch timing for both layers**: the look and the copy each get their own triggers. The per-turn trigger is now a toggle too (on by default, so the historical "one draw per turn" behaviour is unchanged); turning it off keeps that layer's previous draw until another trigger fires. Two more triggers can be enabled per layer: a time trigger re-draws it on a fixed interval or on a random interval between a configured minimum and maximum, and a step trigger re-draws it every N Session `step/start` events. Steps come from a target-less observer Definition registered through `ctx.uiConversation.events` — it records events and returns `null`, so Chat's own rendering is never claimed or affected. The settings page gains a **Switch timing** card with one block per layer.
+
+### Fixed
+
+- **Shimmer ignored the light theme**: the sweep colour was always mixed toward white, so it looked washed out in light themes. It now follows the active colour scheme (mixed toward white on dark themes, toward black on light themes), reads the scheme from the `theme` service when available and repaints on `theme/change`.
+
 ## [0.2.1] — not released
 
 ### Fixed

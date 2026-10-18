@@ -887,3 +887,374 @@ test('startTime 未就绪时不显示裸 {duration} 模板（第一帧交还官�
     host.dispose()
   }
 })
+
+test('触发配置归一化：默认关闭、越界夹紧、随机区间自动排序', () => {
+  const defaults = T.normalizeTriggers(undefined)
+  assert.equal(defaults.look.turn.enabled, true, '每轮触发默认开启（历史行为）')
+  assert.equal(defaults.text.turn.enabled, true)
+  assert.equal(defaults.look.time.enabled, false, '默认不开启时间触发')
+  assert.equal(defaults.look.step.enabled, false, '默认不开启步骤触发')
+  assert.equal(defaults.text.time.mode, 'fixed')
+  assert.equal(defaults.text.step.every, 2)
+
+  const clamped = T.normalizeTriggers({
+    look: { time: { enabled: true, mode: 'random', fixedMs: 1, minMs: 9000, maxMs: 3000 }, step: { enabled: true, every: 999 } },
+  })
+  assert.equal(clamped.look.turn.enabled, true, '未声明时保持每轮触发开启')
+  assert.equal(T.normalizeTriggers({ look: { turn: { enabled: false } } }).look.turn.enabled, false, '显式 false 才关闭')
+  assert.equal(clamped.look.time.enabled, true)
+  assert.equal(clamped.look.time.mode, 'random')
+  assert.deepEqual([clamped.look.time.minMs, clamped.look.time.maxMs], [3000, 9000], 'min/max 颠倒时自动排序')
+  assert.equal(clamped.look.time.fixedMs, 500, '过低间隔夹到 500ms')
+  assert.equal(clamped.look.step.every, 100, '步数上限 100')
+  assert.equal(clamped.text.time.enabled, false, '未配置的层保持默认')
+})
+
+test('时间触发：固定/随机延迟按配置计算，关闭时为 null', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(T.DEFAULT_FLAIR) }) } })
+  module.apply(host.ctx)
+  try {
+    T.setRandom(() => 0.5)
+    T.applyFlair(
+      withFlair({
+        triggers: {
+          look: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: false, every: 2 } },
+          text: { time: { enabled: true, mode: 'fixed', fixedMs: 4000, minMs: 1000, maxMs: 3000 }, step: { enabled: false, every: 2 } },
+        },
+      }),
+    )
+    assert.equal(T.triggerDelay('look'), null, '关闭的层没有延迟')
+    assert.equal(T.triggerDelay('text'), 4000, '固定间隔')
+
+    T.applyFlair(
+      withFlair({
+        triggers: {
+          look: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: false, every: 2 } },
+          text: { time: { enabled: true, mode: 'random', fixedMs: 4000, minMs: 1000, maxMs: 3000 }, step: { enabled: false, every: 2 } },
+        },
+      }),
+    )
+    assert.equal(T.triggerDelay('text'), 2000, '随机间隔落在 [1000, 3000] 中点')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('步骤触发：每 N 步重抽文案，未启用的外观层不动', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const base = plain(withTextPresets())
+  const config = {
+    ...base,
+    triggers: {
+      look: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: false, every: 2 } },
+      text: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: true, every: 2 } },
+    },
+  }
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(config) }) } })
+  module.apply(host.ctx)
+  try {
+    T.setRandom(() => 0)
+    T.resetRun()
+    dom.setRunning(true)
+    T.rollRun()
+    const firstText = T.run.text
+    const firstPreset = T.run.presetId
+
+    T.onStepStart()
+    assert.equal(T.run.text, firstText, '第 1 步不触发（每 2 步）')
+    assert.equal(T.run.presetId, firstPreset)
+
+    T.setRandom(() => 0.9)
+    T.onStepStart()
+    assert.notEqual(T.run.text, firstText, '第 2 步重抽文案')
+    assert.equal(T.run.presetId, firstPreset, '外观层未启用步骤触发，保持不动')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('扫光颜色跟随主题深浅：深色提亮、浅色压暗', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+
+  const darkHost = createCtx({})
+  module.apply(darkHost.ctx)
+  try {
+    assert.equal(T.currentColorScheme(), 'dark', '没有主题服务时按深色回退')
+    assert.equal(T.shimmerColor({ color: '#efb864' }), 'color-mix(in srgb, #efb864 45%, #ffffff)')
+  } finally {
+    darkHost.dispose()
+  }
+
+  const lightHost = createCtx({ theme: { getSnapshot: () => ({ active: { colorScheme: 'light' } }) } })
+  module.apply(lightHost.ctx)
+  try {
+    assert.equal(T.currentColorScheme(), 'light')
+    assert.equal(T.shimmerColor({ color: '#efb864' }), 'color-mix(in srgb, #efb864 70%, #000000)', '浅色主题往黑里压')
+  } finally {
+    lightHost.dispose()
+  }
+})
+
+test('自定义扫光色：深色/浅色各取各的，留空回退自动派生', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+
+  const darkHost = createCtx({})
+  module.apply(darkHost.ctx)
+  try {
+    const style = { color: '#efb864', shimmerDark: '#ffaa00', shimmerLight: '#334455' }
+    assert.equal(T.shimmerColor(style), '#ffaa00', '深色主题用深色自定义色')
+    assert.equal(T.shimmerColor({ color: '#efb864', shimmerLight: '#334455' }), 'color-mix(in srgb, #efb864 45%, #ffffff)', '缺深色自定义色时自动派生')
+  } finally {
+    darkHost.dispose()
+  }
+
+  const lightHost = createCtx({ theme: { getSnapshot: () => ({ active: { colorScheme: 'light' } }) } })
+  module.apply(lightHost.ctx)
+  try {
+    const style = { color: '#efb864', shimmerDark: '#ffaa00', shimmerLight: '#334455' }
+    assert.equal(T.shimmerColor(style), '#334455', '浅色主题用浅色自定义色')
+  } finally {
+    lightHost.dispose()
+  }
+})
+
+test('扫光色归一化：只接受合法 CSS 颜色，非法值退回自动', () => {
+  const accepted = T.normalizeStyle({ shimmerDark: '#FF0000', shimmerLight: '#0f0' })
+  assert.equal(accepted.shimmerDark, '#ff0000')
+  assert.equal(accepted.shimmerLight, '#00ff00')
+  const rejected = T.normalizeStyle({ shimmerDark: 'red;}body{display:none', shimmerLight: 'not-a-color' })
+  assert.equal(rejected.shimmerDark, '', '注入式字符串被拒绝')
+  assert.equal(rejected.shimmerLight, '', '非法颜色退回空串（自动）')
+})
+
+test('步骤触发的事件源：注册观察 Definition，收到 step/start 才计数', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const base = plain(withTextPresets())
+  const config = {
+    ...base,
+    triggers: {
+      look: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: false, every: 2 } },
+      text: { time: { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }, step: { enabled: true, every: 2 } },
+    },
+  }
+  let definition = null
+  const uiConversation = {
+    events: {
+      register(value) {
+        definition = value
+        return () => {
+          definition = null
+        }
+      },
+    },
+  }
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(config) }) }, uiConversation })
+  module.apply(host.ctx)
+  try {
+    assert.notEqual(definition, null, '应注册一个 step 观察 Definition')
+    assert.equal(typeof definition.match, 'function')
+
+    T.setRandom(() => 0)
+    T.resetRun()
+    dom.setRunning(true)
+    T.rollRun()
+    const firstText = T.run.text
+
+    assert.equal(definition.match({ type: 'step/start', data: {} }), null, '只旁听，不认领事件')
+    T.setRandom(() => 0.9)
+    definition.match({ type: 'step/start', data: {} })
+    assert.notEqual(T.run.text, firstText, '第 2 个 step/start 触发文案重抽')
+
+    definition.match({ type: 'turn/start', data: {} })
+    assert.equal(T.run.stepCount, 0, '新 turn 重置步数')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('设置页渲染切换时机：外观与文案两层各含每轮、时间、步骤触发', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(withTextPresets()) }) } })
+  module.apply(host.ctx)
+  try {
+    const tree = T.StatusFlairSection({ t: (key) => key })
+    const flat = collect(tree)
+    const texts = flat.map((node) => node.text ?? '')
+    assert.ok(texts.includes('triggersTitle'), '有「切换时机」卡片')
+    assert.ok(texts.includes('layerLook') && texts.includes('layerText'), '外观与文案两层')
+    assert.equal(texts.filter((value) => value === 'turnTrigger').length, 2, '两层各一个每轮触发')
+    assert.equal(texts.filter((value) => value === 'timeTrigger').length, 2, '两层各一个时间触发')
+    assert.equal(texts.filter((value) => value === 'stepTrigger').length, 2, '两层各一个步骤触发')
+    assert.equal(texts.filter((value) => value === 'triggerOff').length, 6, '两层各三个开关')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('每轮触发：关闭某层后新一轮沿用上一轮抽签结果', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const base = plain(
+    withFlair({
+      presets: plain(T.DEFAULT_FLAIR.presets),
+      textPresets: [{ id: 'text-a', name: 'A', texts: ['第一条文案', '第二条文案'] }],
+      selection: selection({
+        presetMode: 'random',
+        presetIds: ['golden', 'violet', 'terminal'],
+        textPresetMode: 'fixed',
+        fixedTextPresetId: 'text-a',
+        textPresetIds: ['text-a'],
+        textMode: 'random',
+      }),
+    }),
+  )
+  const off = { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }
+  const config = {
+    ...base,
+    triggers: {
+      look: { turn: { enabled: false }, time: off, step: { enabled: false, every: 2 } },
+      text: { turn: { enabled: true }, time: off, step: { enabled: false, every: 2 } },
+    },
+  }
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(config) }) } })
+  module.apply(host.ctx)
+  try {
+    T.setRandom(() => 0)
+    T.resetRun()
+    dom.setRunning(true)
+    T.rollRun()
+    const firstLook = T.run.presetId
+    const firstText = T.run.text
+    assert.equal(firstLook, 'golden')
+    assert.equal(firstText, '第一条文案')
+
+    // 本轮结束 → 新一轮开始：外观层关闭每轮触发，文案层开启
+    dom.setRunning(false)
+    dom.triggerMutations()
+    T.setRandom(() => 0.9)
+    dom.setRunning(true)
+    T.rollRun()
+    assert.equal(T.run.presetId, firstLook, '外观沿用上一轮')
+    assert.notEqual(T.run.text, firstText, '文案每轮重抽')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('每轮触发关闭且无其它触发器时，两层都保持初始抽签结果', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const base = plain(
+    withFlair({
+      presets: plain(T.DEFAULT_FLAIR.presets),
+      textPresets: [{ id: 'text-a', name: 'A', texts: ['第一条文案', '第二条文案'] }],
+      selection: selection({
+        presetMode: 'random',
+        presetIds: ['golden', 'violet', 'terminal'],
+        textPresetMode: 'fixed',
+        fixedTextPresetId: 'text-a',
+        textPresetIds: ['text-a'],
+        textMode: 'random',
+      }),
+    }),
+  )
+  const off = { enabled: false, mode: 'fixed', fixedMs: 5000, minMs: 3000, maxMs: 9000 }
+  const config = {
+    ...base,
+    triggers: {
+      look: { turn: { enabled: false }, time: off, step: { enabled: false, every: 2 } },
+      text: { turn: { enabled: false }, time: off, step: { enabled: false, every: 2 } },
+    },
+  }
+  const host = createCtx({ forms: { get: () => createForm({ flair: plain(config) }) } })
+  module.apply(host.ctx)
+  try {
+    T.setRandom(() => 0)
+    T.resetRun()
+    dom.setRunning(true)
+    T.rollRun()
+    const firstLook = T.run.presetId
+    const firstText = T.run.text
+
+    dom.setRunning(false)
+    dom.triggerMutations()
+    T.setRandom(() => 0.9)
+    dom.setRunning(true)
+    T.rollRun()
+    assert.equal(T.run.presetId, firstLook, '外观保持')
+    assert.equal(T.run.text, firstText, '文案保持')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('自动扫光色：面板近似值跟随主题与主色', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+
+  const darkHost = createCtx({})
+  module.apply(darkHost.ctx)
+  try {
+    // 深色：45% 主色 + 55% 白
+    assert.equal(T.autoShimmerHex({ color: '#efb864' }), '#f8dfb9')
+    assert.equal(T.blendHex('#000000', '#ffffff', 0.5), '#808080')
+  } finally {
+    darkHost.dispose()
+  }
+
+  const lightHost = createCtx({ theme: { getSnapshot: () => ({ active: { colorScheme: 'light' } }) } })
+  module.apply(lightHost.ctx)
+  try {
+    // 浅色：70% 主色 + 30% 黑
+    assert.equal(T.autoShimmerHex({ color: '#efb864' }), '#a78146')
+  } finally {
+    lightHost.dispose()
+  }
+})
+
+test('图标可选「不显示」：归一化接受 none，绘制时隐藏图标位', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  assert.equal(T.normalizeStyle({ icon: 'none' }).icon, 'none')
+  assert.equal(T.iconLabel('none', (key) => key), 'iconNone')
+
+  const host = createCtx({})
+  module.apply(host.ctx)
+  try {
+    const noIcon = withFlair({
+      presets: [{ id: 'plain', name: '无图标', style: { color: '#efb864', fontSize: 13, icon: 'none', shimmerDuration: 2000 } }],
+      selection: selection({ presetMode: 'fixed', fixedPresetId: 'plain', presetIds: ['plain'] }),
+    })
+    T.applyFlair(noIcon)
+    T.resetRun()
+    dom.setRunning(true)
+    T.rollRun()
+    assert.equal(dom.documentElement.hasAttribute(T.NO_ICON_ATTR), true, '挂上隐藏标记')
+    assert.equal(dom.vars.get('--dsh-sf-icon-mask'), 'linear-gradient(#0000, #0000)', '遮罩变全透明')
+    T.clearPaint()
+    assert.equal(dom.documentElement.hasAttribute(T.NO_ICON_ATTR), false, '清除时摘掉标记')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('扫光面板预览：两种主题字段各按自己的主题取自动色', async () => {
+  const { dom } = await loadClient()
+  reset(dom)
+  const host = createCtx({})
+  module.apply(host.ctx)
+  try {
+    // 当前是深色主题，但「浅色主题」字段要预览浅色主题下的自动色
+    assert.equal(T.autoShimmerHex({ color: '#efb864' }, 'dark'), '#f8dfb9')
+    assert.equal(T.autoShimmerHex({ color: '#efb864' }, 'light'), '#a78146')
+  } finally {
+    host.dispose()
+  }
+})

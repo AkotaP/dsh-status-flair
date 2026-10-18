@@ -162,6 +162,8 @@ test('flair 之下的路径全部可写，其它字段不行', () => {
   assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'presets']), true)
   assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'textPresets']), true)
   assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'selection', 'textPresetMode']), true)
+  assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'triggers', 'text', 'time', 'fixedMs']), true)
+  assert.equal(isVolatilePath(Config, [FLAIR_KEY, 'triggers', 'look', 'step', 'every']), true)
   assert.equal(isVolatilePath(Config, ['other']), false)
   assert.equal(isVolatilePath(Config, []), false)
 })
@@ -169,7 +171,14 @@ test('flair 之下的路径全部可写，其它字段不行', () => {
 test('这份配置里外观、文案与选择字段都在表单里', () => {
   const form = volatileForm(Config)
   const flairForm = form.dict[FLAIR_KEY]
-  assert.deepEqual(Object.keys(flairForm.dict).sort(), ['enabled', 'presets', 'selection', 'textPresets'])
+  assert.deepEqual(Object.keys(flairForm.dict).sort(), ['enabled', 'presets', 'selection', 'textPresets', 'triggers'])
+  // 外观与文案各自独立的触发配置：每轮 + 时间（固定/随机）+ 步骤
+  assert.deepEqual(Object.keys(flairForm.dict.triggers.dict).sort(), ['look', 'text'])
+  const layerForm = flairForm.dict.triggers.dict.look
+  assert.deepEqual(Object.keys(layerForm.dict).sort(), ['step', 'time', 'turn'])
+  assert.deepEqual(Object.keys(layerForm.dict.turn.dict).sort(), ['enabled'])
+  assert.deepEqual(Object.keys(layerForm.dict.time.dict).sort(), ['enabled', 'fixedMs', 'maxMs', 'minMs', 'mode'])
+  assert.deepEqual(Object.keys(layerForm.dict.step.dict).sort(), ['enabled', 'every'])
   assert.deepEqual(Object.keys(flairForm.dict.selection.dict).sort(), [
     'fixedPresetId',
     'fixedTextPresetId',
@@ -181,7 +190,15 @@ test('这份配置里外观、文案与选择字段都在表单里', () => {
   ])
   const presetForm = flairForm.dict.presets.inner
   assert.deepEqual(Object.keys(presetForm.dict).sort(), ['id', 'name', 'nameKey', 'style', 'texts'])
-  assert.deepEqual(Object.keys(presetForm.dict.style.dict).sort(), ['color', 'fontSize', 'icon', 'iconSource', 'shimmerDuration'])
+  assert.deepEqual(Object.keys(presetForm.dict.style.dict).sort(), [
+    'color',
+    'fontSize',
+    'icon',
+    'iconSource',
+    'shimmerDark',
+    'shimmerDuration',
+    'shimmerLight',
+  ])
   const textPresetForm = flairForm.dict.textPresets.inner
   assert.deepEqual(Object.keys(textPresetForm.dict).sort(), ['id', 'name', 'texts'])
 })
@@ -191,13 +208,16 @@ test('校验后的配置能被投影、能原样写回', () => {
   const form = volatileForm(Config)
   const projected = projectForm(form, resolved)
   assert.deepEqual(Object.keys(projected), [FLAIR_KEY])
-  // 保留的旧字段 texts 与新增的 iconSource 会被 schema 补成空值；写回前它们都是空的，不影响迁移
+  // 保留的旧字段 texts 与新增的空默认值（iconSource / 扫光色）会被 schema 补出来；
+  // 写回前它们都是空的，不影响迁移。
   const stripSchemaDefaults = (flairValue) => ({
     ...flairValue,
     presets: flairValue.presets.map((preset) => {
       const { texts, ...rest } = preset
       const style = { ...rest.style }
       if (style.iconSource === '') delete style.iconSource
+      if (style.shimmerDark === '') delete style.shimmerDark
+      if (style.shimmerLight === '') delete style.shimmerLight
       return texts !== undefined && texts.length === 0 ? { ...rest, style } : { ...preset, style }
     }),
   })
