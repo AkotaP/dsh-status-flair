@@ -1,0 +1,6 @@
+# 把插件插进当前 profile 的插件树。
+# id 必须与客户端 configForms.get(<id>) 一致，也等于 settings 文档里的条目名。
+- insert:
+    - id: status-flair
+      name: 'dsh-status-flair'
+      config: {}
